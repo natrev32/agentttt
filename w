@@ -1,5 +1,6 @@
 -- ==============================================================================
--- NIMBUS AGENT SCRIPT UNTUK EXECUTOR DELTA & POTASSIUM (ANIME DICE EDITION)
+-- NIMBUS AGENT SCRIPT KHUSUS DELTA EXECUTOR (ANIME DICE EDITION)
+-- Pure HTTP Version (100% Safe for Delta Mobile & PC)
 -- ==============================================================================
 
 local HttpService = game:GetService("HttpService")
@@ -13,8 +14,7 @@ local LocalPlayer = Players.LocalPlayer
 -- KONFIGURASI
 -- ==========================================
 local CONFIG = {
-    -- Alamat WebSocket backend Nimbus
-    WS_URL = "ws://127.0.0.1:3000/ws",
+    -- Jika Delta di HP/Android & Server di PC, ganti 127.0.0.1 ke IP PC (contoh: http://192.168.1.5:3000)
     HTTP_URL = "http://127.0.0.1:3000",
     
     -- Token Agent Nimbus Anda
@@ -28,37 +28,39 @@ local CONFIG = {
 }
 
 -- ==========================================
--- UNIVERSAL API RESOLVER (DELTA & POTASSIUM)
+-- DELTA REQUEST FUNCTION DETECTOR
 -- ==========================================
-local httpRequest = (syn and syn.request) 
+local httpReq = (request) 
     or (http and http.request) 
+    or (syn and syn.request) 
     or http_request 
-    or request 
     or (fluxus and fluxus.request)
 
-local connectWS = nil
-if WebSocket and WebSocket.connect then
-    connectWS = WebSocket.connect
-elseif websocket and websocket.connect then
-    connectWS = websocket.connect
-elseif syn and syn.websocket and syn.websocket.connect then
-    connectWS = syn.websocket.connect
+if not httpReq then
+    warn("[Nimbus Delta Error] Executor Anda tidak mendukung fungsi HTTP request!")
+    return
 end
 
 -- ==========================================
 -- 1. LOAD GAME CONTROLLER
 -- ==========================================
+local DataController, EntryRegistry = nil, nil
+
 local function resolveControllers()
     local Framework = ReplicatedStorage:WaitForChild("Framework", 10)
     if not Framework then
-        warn("[Nimbus] Folder ReplicatedStorage.Framework tidak ditemukan!")
+        warn("[Nimbus Delta] Folder Framework tidak ditemukan!")
         return nil, nil
     end
 
-    local DataControllerModule = Framework:WaitForChild("Features"):WaitForChild("Data"):WaitForChild("DataController", 5)
-    local EntryRegistryModule = Framework:WaitForChild("Features"):WaitForChild("Inventory"):WaitForChild("EntryRegistry", 5)
+    local Features = Framework:WaitForChild("Features", 5)
+    if not Features then return nil, nil end
 
-    local DataController, EntryRegistry = nil, nil
+    local DataFolder = Features:WaitForChild("Data", 5)
+    local InventoryFolder = Features:WaitForChild("Inventory", 5)
+
+    local DataControllerModule = DataFolder and DataFolder:WaitForChild("DataController", 5)
+    local EntryRegistryModule = InventoryFolder and InventoryFolder:WaitForChild("EntryRegistry", 5)
 
     if DataControllerModule and DataControllerModule:IsA("ModuleScript") then
         local ok, dc = pcall(require, DataControllerModule)
@@ -76,7 +78,7 @@ end
 -- ==========================================
 -- 2. PEMINDAI INVENTORI
 -- ==========================================
-local function getInventoryTable(DataController)
+local function getInventoryTable()
     if not DataController or not DataController.Inventory then return nil end
 
     local ok, inv = pcall(function() return DataController.Inventory() end)
@@ -86,11 +88,11 @@ local function getInventoryTable(DataController)
     return nil
 end
 
-local function scanBackpack(DataController, EntryRegistry)
+local function scanBackpack()
     local units = {}
     local itemMap = {}
 
-    local inventory = getInventoryTable(DataController)
+    local inventory = getInventoryTable()
     if not inventory then return units, {} end
 
     for itemId, entry in pairs(inventory) do
@@ -102,33 +104,65 @@ local function scanBackpack(DataController, EntryRegistry)
             local attrs = entry.attributes or {}
 
             if kind == "unit" or kind == "pet" or kind == "character" then
+                -- Hitung Rarity
                 local rarity = "Common"
                 if type(entryConfig.getRarity) == "function" then
                     local okR, resR = pcall(entryConfig.getRarity, attrs)
+                    if okR and resR then rarity = tostring(resR) end
+                elseif type(entryConfig.rarity) == "function" then
+                    local okR, resR = pcall(entryConfig.rarity, attrs)
                     if okR and resR then rarity = tostring(resR) end
                 elseif entryConfig.rarity then
                     rarity = tostring(entryConfig.rarity)
                 end
 
+                -- Ambil Mutasi
                 local mutations = {}
                 if attrs.mutation and attrs.mutation ~= "" then
                     table.insert(mutations, tostring(attrs.mutation))
+                elseif type(attrs.mutations) == "table" then
+                    for _, m in ipairs(attrs.mutations) do
+                        table.insert(mutations, tostring(m))
+                    end
                 end
 
+                -- Hitung Income
                 local income = 0
                 if type(entryConfig.income) == "function" then
                     local okInc, resInc = pcall(entryConfig.income, attrs)
                     if okInc and tonumber(resInc) then income = tonumber(resInc) end
+                elseif attrs.income then
+                    income = tonumber(attrs.income) or 0
                 end
+
+                -- Hitung Odds / Peluang
+                local odds = nil
+                local chanceVal = nil
+                if type(entryConfig.resolveChance) == "function" then
+                    local okC, resC = pcall(entryConfig.resolveChance, attrs)
+                    if okC then chanceVal = resC end
+                elseif type(entryConfig.chance) == "function" then
+                    local okC, resC = pcall(entryConfig.chance, attrs)
+                    if okC then chanceVal = resC end
+                elseif entryConfig.chance then
+                    chanceVal = entryConfig.chance
+                end
+                if chanceVal and tonumber(chanceVal) then
+                    odds = "1 in " .. tostring(math.floor(chanceVal))
+                end
+
+                local size = attrs.size or entryConfig.size or "Normal"
+                local location = attrs.equipped and "Equipped" or "Backpack"
 
                 table.insert(units, {
                     uid = tostring(itemId),
                     name = entry.name,
                     rarity = rarity,
-                    size = tostring(attrs.size or entryConfig.size or "Normal"),
+                    size = tostring(size),
                     mutations = mutations,
                     income = income,
-                    location = attrs.equipped and "Equipped" or "Backpack",
+                    odds = odds,
+                    location = location,
                 })
             else
                 local currentQty = itemMap[entry.name] or 0
@@ -146,25 +180,19 @@ local function scanBackpack(DataController, EntryRegistry)
 end
 
 -- ==========================================
--- 3. KONEKSI & AUTOSYNC
+-- 3. UTILITAS SYNC HTTP KHUSUS DELTA
 -- ==========================================
-local wsConnection = nil
-local isConnected = false
-local DataController, EntryRegistry = nil, nil
-
-local function sendWS(payload)
-    if wsConnection then
-        wsConnection:Send(HttpService:JSONEncode(payload))
-    end
-end
-
-local function syncStats()
+local function syncStatsDelta()
     if not DataController or not EntryRegistry then
-        DataController, EntryRegistry = resolveControllers()
+        resolveControllers()
     end
-    if not DataController then return end
+    
+    if not DataController then
+        warn("[Nimbus Delta] Menunggu DataController siap...")
+        return
+    end
 
-    local units, items = scanBackpack(DataController, EntryRegistry)
+    local units, items = scanBackpack()
     local payload = {
         type = "sync",
         account = LocalPlayer.Name,
@@ -174,98 +202,45 @@ local function syncStats()
         items = items,
     }
 
-    if isConnected and wsConnection then
-        sendWS(payload)
-        print(string.format("[Nimbus Delta] WS Sync berhasil: %d unit, %d item", #units, #items))
-    elseif httpRequest then
-        -- Fallback HTTP jika WebSocket Delta tidak terhubung ke 127.0.0.1
-        task.spawn(function()
-            pcall(function()
-                httpRequest({
-                    Url = CONFIG.HTTP_URL .. "/agent/sync",
-                    Method = "POST",
-                    Headers = {
-                        ["Content-Type"] = "application/json",
-                        ["X-Agent-Key"] = CONFIG.AGENT_TOKEN,
-                    },
-                    Body = HttpService:JSONEncode(payload)
-                })
-            end)
+    task.spawn(function()
+        local ok, res = pcall(function()
+            return httpReq({
+                Url = CONFIG.HTTP_URL .. "/agent/sync",
+                Method = "POST",
+                Headers = {
+                    ["Content-Type"] = "application/json",
+                    ["X-Agent-Key"] = CONFIG.AGENT_TOKEN,
+                },
+                Body = HttpService:JSONEncode(payload)
+            })
         end)
-        print(string.format("[Nimbus Delta] HTTP Fallback Sync: %d unit, %d item", #units, #items))
-    end
+
+        if ok and res then
+            local statusCode = res.StatusCode or res.status_code or res.Status
+            if statusCode and (statusCode >= 200 and statusCode < 300) then
+                print(string.format("[Nimbus Delta] Berhasil Sync: %d unit, %d item terkirim!", #units, #items))
+            else
+                warn(string.format("[Nimbus Delta] Gagal Sync (HTTP Status %s): %s", tostring(statusCode), tostring(res.Body or res.body or "Unknown error")))
+            end
+        else
+            warn("[Nimbus Delta] Gagal menghubungi backend (" .. CONFIG.HTTP_URL .. "). Pastikan server menyala dan IP/Port benar!")
+        end
+    end)
 end
 
 -- ==========================================
 -- 4. START AGENT
 -- ==========================================
-local function startAgent()
-    print("[Nimbus] Menginisialisasi Agent untuk Delta Executor...")
-    DataController, EntryRegistry = resolveControllers()
+print("==================================================")
+print("[Nimbus Agent] Memulai Script di Delta Executor...")
+print("==================================================")
 
-    -- Jika Delta tidak mendukung WebSocket ke Localhost
-    if not connectWS then
-        warn("[Nimbus] Executor Delta tidak mendukung WebSocket API standar. Menggunakan HTTP Mode.")
-        task.spawn(function()
-            while true do
-                syncStats()
-                task.wait(CONFIG.SYNC_INTERVAL)
-            end
-        end)
-        return
+resolveControllers()
+
+-- Jalankan Loop Sync berkala
+task.spawn(function()
+    while true do
+        syncStatsDelta()
+        task.wait(CONFIG.SYNC_INTERVAL)
     end
-
-    local function connect()
-        local ok, ws = pcall(function()
-            return connectWS(CONFIG.WS_URL)
-        end)
-
-        if not ok or not ws then
-            warn("[Nimbus] Gagal terhubung via WS. Menmencoba HTTP polling mode...")
-            task.spawn(function()
-                while not isConnected do
-                    syncStats()
-                    task.wait(CONFIG.SYNC_INTERVAL)
-                end
-            end)
-            return
-        end
-
-        wsConnection = ws
-
-        sendWS({
-            type = "auth",
-            role = "agent",
-            token = CONFIG.AGENT_TOKEN,
-            account = LocalPlayer.Name,
-        })
-
-        ws.OnMessage:Connect(function(raw)
-            local okDecode, msg = pcall(function() return HttpService:JSONDecode(raw) end)
-            if not okDecode or not msg then return end
-
-            if msg.type == "ready" then
-                isConnected = true
-                print(">>> [Nimbus] Berhasil Terhubung di Delta Executor! <<<")
-                syncStats()
-            end
-        end)
-
-        ws.OnClose:Connect(function()
-            isConnected = false
-            wsConnection = nil
-            task.delay(5, connect)
-        end)
-    end
-
-    task.spawn(connect)
-
-    task.spawn(function()
-        while true do
-            task.wait(CONFIG.SYNC_INTERVAL)
-            syncStats()
-        end
-    end)
-end
-
-startAgent()
+end)
