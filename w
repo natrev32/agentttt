@@ -1,246 +1,177 @@
--- ==============================================================================
--- NIMBUS AGENT SCRIPT KHUSUS DELTA EXECUTOR (ANIME DICE EDITION)
--- Pure HTTP Version (100% Safe for Delta Mobile & PC)
--- ==============================================================================
+-- ==========================================
+-- SCRIPT AUTO BUY & DISCORD WEBHOOK MONITOR (FIXED)
+-- ==========================================
 
 local HttpService = game:GetService("HttpService")
-local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local TeleportService = game:GetService("TeleportService")
+local Players = game:GetService("Players")
 
 local LocalPlayer = Players.LocalPlayer
+local WebhookURL = "https://discord.com/api/webhooks/1563525889583743106/gutwd2T6TV2G2KEB9MaWTcllL5OdGDGK97LSpe09DIftrfr_0FH9GhIPbFihpwSLAxPR"
 
--- ==========================================
--- KONFIGURASI
--- ==========================================
-local CONFIG = {
-    -- Jika Delta di HP/Android & Server di PC, ganti 127.0.0.1 ke IP PC (contoh: http://192.168.1.5:3000)
-    HTTP_URL = "http://127.0.0.1:3000",
-    
-    -- Token Agent Nimbus Anda
-    AGENT_TOKEN = "agent_8U0tEM-B0w_QOAoJBCe8pNZxAajX46ax",
-    
-    -- Interval pengiriman stats ke dashboard (detik)
-    SYNC_INTERVAL = 8,
-    
-    -- Identifier game
-    GAME_NAME = "anime-dice",
-}
+-- 1. REMOTE EVENT BUY
+local BuyEvent = ReplicatedStorage:WaitForChild("Network"):WaitForChild("QuestService"):WaitForChild("RE"):WaitForChild("Buy")
 
--- ==========================================
--- DELTA REQUEST FUNCTION DETECTOR
--- ==========================================
-local httpReq = (request) 
-    or (http and http.request) 
-    or (syn and syn.request) 
-    or http_request 
-    or (fluxus and fluxus.request)
-
-if not httpReq then
-    warn("[Nimbus Delta Error] Executor Anda tidak mendukung fungsi HTTP request!")
-    return
+-- 2. CARI CONTROLLER DATA SECARA DINAMIS
+local function getDataController()
+    local success, controller = pcall(function()
+        -- Coba beberapa path Controller yang biasa digunakan
+        if LocalPlayer.PlayerScripts:FindFirstChild("Client") then
+            local client = LocalPlayer.PlayerScripts.Client
+            if client:FindFirstChild("Controllers") and client.Controllers:FindFirstChild("DataController") then
+                return require(client.Controllers.DataController)
+            end
+        end
+        -- Fallback jika ada di Controllers langsung
+        if LocalPlayer.PlayerScripts:FindFirstChild("Controllers") and LocalPlayer.PlayerScripts.Controllers:FindFirstChild("DataController") then
+            return require(LocalPlayer.PlayerScripts.Controllers.DataController)
+        end
+        return nil
+    end)
+    
+    if success and controller then
+        return controller
+    end
+    return nil
 end
 
--- ==========================================
--- 1. LOAD GAME CONTROLLER
--- ==========================================
-local DataController, EntryRegistry = nil, nil
-
-local function resolveControllers()
-    local Framework = ReplicatedStorage:WaitForChild("Framework", 10)
-    if not Framework then
-        warn("[Nimbus Delta] Folder Framework tidak ditemukan!")
-        return nil, nil
+-- 3. PEMINDAI INVENTORY (MENGGUNAKAN LOGIKA SCANNER ANDA)
+local function getInventoryTable(DataController)
+    if not DataController or not DataController.Inventory then
+        return nil
     end
 
-    local Features = Framework:WaitForChild("Features", 5)
-    if not Features then return nil, nil end
+    local ok, inv = pcall(function()
+        return DataController.Inventory()
+    end)
 
-    local DataFolder = Features:WaitForChild("Data", 5)
-    local InventoryFolder = Features:WaitForChild("Inventory", 5)
-
-    local DataControllerModule = DataFolder and DataFolder:WaitForChild("DataController", 5)
-    local EntryRegistryModule = InventoryFolder and InventoryFolder:WaitForChild("EntryRegistry", 5)
-
-    if DataControllerModule and DataControllerModule:IsA("ModuleScript") then
-        local ok, dc = pcall(require, DataControllerModule)
-        if ok and dc then DataController = dc end
+    if ok and type(inv) == "table" then
+        return inv
     end
 
-    if EntryRegistryModule and EntryRegistryModule:IsA("ModuleScript") then
-        local ok, er = pcall(require, EntryRegistryModule)
-        if ok and er then EntryRegistry = er end
+    if type(DataController.Inventory) == "table" then
+        return DataController.Inventory
     end
-
-    return DataController, EntryRegistry
-end
-
--- ==========================================
--- 2. PEMINDAI INVENTORI
--- ==========================================
-local function getInventoryTable()
-    if not DataController or not DataController.Inventory then return nil end
-
-    local ok, inv = pcall(function() return DataController.Inventory() end)
-    if ok and type(inv) == "table" then return inv end
-    if type(DataController.Inventory) == "table" then return DataController.Inventory end
 
     return nil
 end
 
-local function scanBackpack()
-    local units = {}
-    local itemMap = {}
+local function scanBackpackAndGems(DataController)
+    local traitRerollQty = 0
+    local gemsCount = nil
 
-    local inventory = getInventoryTable()
-    if not inventory then return units, {} end
-
-    for itemId, entry in pairs(inventory) do
-        if type(entry) == "table" and type(entry.name) == "string" then
-            local entryConfig = (EntryRegistry and type(EntryRegistry.getEntryConfig) == "function")
-                and EntryRegistry.getEntryConfig(entry.name) or {}
-
-            local kind = string.lower(entryConfig.kind or entry.kind or "")
-            local attrs = entry.attributes or {}
-
-            if kind == "unit" or kind == "pet" or kind == "character" then
-                -- Hitung Rarity
-                local rarity = "Common"
-                if type(entryConfig.getRarity) == "function" then
-                    local okR, resR = pcall(entryConfig.getRarity, attrs)
-                    if okR and resR then rarity = tostring(resR) end
-                elseif type(entryConfig.rarity) == "function" then
-                    local okR, resR = pcall(entryConfig.rarity, attrs)
-                    if okR and resR then rarity = tostring(resR) end
-                elseif entryConfig.rarity then
-                    rarity = tostring(entryConfig.rarity)
+    -- 1. Pindai Inventory
+    local inventory = getInventoryTable(DataController)
+    if inventory then
+        for _, entry in pairs(inventory) do
+            if type(entry) == "table" then
+                local itemName = entry.name or (entry.config and entry.config.name) or ""
+                if string.lower(itemName) == "trait reroll" then
+                    traitRerollQty = traitRerollQty + (entry.amount or entry.quantity or 1)
                 end
-
-                -- Ambil Mutasi
-                local mutations = {}
-                if attrs.mutation and attrs.mutation ~= "" then
-                    table.insert(mutations, tostring(attrs.mutation))
-                elseif type(attrs.mutations) == "table" then
-                    for _, m in ipairs(attrs.mutations) do
-                        table.insert(mutations, tostring(m))
-                    end
-                end
-
-                -- Hitung Income
-                local income = 0
-                if type(entryConfig.income) == "function" then
-                    local okInc, resInc = pcall(entryConfig.income, attrs)
-                    if okInc and tonumber(resInc) then income = tonumber(resInc) end
-                elseif attrs.income then
-                    income = tonumber(attrs.income) or 0
-                end
-
-                -- Hitung Odds / Peluang
-                local odds = nil
-                local chanceVal = nil
-                if type(entryConfig.resolveChance) == "function" then
-                    local okC, resC = pcall(entryConfig.resolveChance, attrs)
-                    if okC then chanceVal = resC end
-                elseif type(entryConfig.chance) == "function" then
-                    local okC, resC = pcall(entryConfig.chance, attrs)
-                    if okC then chanceVal = resC end
-                elseif entryConfig.chance then
-                    chanceVal = entryConfig.chance
-                end
-                if chanceVal and tonumber(chanceVal) then
-                    odds = "1 in " .. tostring(math.floor(chanceVal))
-                end
-
-                local size = attrs.size or entryConfig.size or "Normal"
-                local location = attrs.equipped and "Equipped" or "Backpack"
-
-                table.insert(units, {
-                    uid = tostring(itemId),
-                    name = entry.name,
-                    rarity = rarity,
-                    size = tostring(size),
-                    mutations = mutations,
-                    income = income,
-                    odds = odds,
-                    location = location,
-                })
-            else
-                local currentQty = itemMap[entry.name] or 0
-                itemMap[entry.name] = currentQty + (entry.amount or 1)
             end
         end
     end
 
-    local items = {}
-    for itemName, qty in pairs(itemMap) do
-        table.insert(items, { name = itemName, qty = qty })
+    -- 2. Pindai Gems dari DataController / Replica
+    if DataController then
+        pcall(function()
+            if type(DataController.Gems) == "function" then
+                gemsCount = DataController.Gems()
+            elseif DataController.Gems then
+                gemsCount = DataController.Gems
+            elseif type(DataController.GetData) == "function" then
+                local data = DataController.GetData()
+                if data then gemsCount = data.Gems or data.Gem end
+            elseif DataController.Data then
+                gemsCount = DataController.Data.Gems or DataController.Data.Gem
+            end
+        end)
     end
 
-    return units, items
+    -- Fallback jika Gems tersimpan di leaderstats
+    if not gemsCount then
+        local leaderstats = LocalPlayer:FindFirstChild("leaderstats")
+        if leaderstats then
+            local g = leaderstats:FindFirstChild("Gems") or leaderstats:FindFirstChild("Gem")
+            if g then gemsCount = g.Value end
+        end
+    end
+
+    return traitRerollQty, gemsCount or "Tidak Diketahui"
 end
 
--- ==========================================
--- 3. UTILITAS SYNC HTTP KHUSUS DELTA
--- ==========================================
-local function syncStatsDelta()
-    if not DataController or not EntryRegistry then
-        resolveControllers()
-    end
-    
-    if not DataController then
-        warn("[Nimbus Delta] Menunggu DataController siap...")
-        return
-    end
+-- 4. FUNGSI KIRIM WEBHOOK
+local function sendWebhook(traitRerollCount, gemsCount)
+    local jobId = game.JobId
+    local profileName = LocalPlayer.Name
+    local scriptTeleport = string.format('game:GetService("TeleportService"):TeleportToPlaceInstance(%d, "%s", game.Players.LocalPlayer)', game.PlaceId, jobId)
 
-    local units, items = scanBackpack()
-    local payload = {
-        type = "sync",
-        account = LocalPlayer.Name,
-        serverId = game.JobId ~= "" and game.JobId or nil,
-        game = CONFIG.GAME_NAME,
-        units = units,
-        items = items,
+    local data = {
+        ["embeds"] = {{
+            ["title"] = "🛒 Status Auto Buy Trait Reroll",
+            ["color"] = 65280,
+            ["fields"] = {
+                {
+                    ["name"] = "👤 Player",
+                    ["value"] = "```" .. profileName .. "```",
+                    ["inline"] = true
+                },
+                {
+                    ["name"] = "💎 Gems",
+                    ["value"] = "```" .. tostring(gemsCount) .. "```",
+                    ["inline"] = true
+                },
+                {
+                    ["name"] = "🎲 Trait Reroll",
+                    ["value"] = "```" .. tostring(traitRerollCount) .. "```",
+                    ["inline"] = true
+                },
+                {
+                    ["name"] = "🆔 Job ID (Current Server)",
+                    ["value"] = "```" .. (jobId ~= "" and jobId or "Studio / Offline") .. "```",
+                    ["inline"] = false
+                },
+                {
+                    ["name"] = "🔗 Script Join Server",
+                    ["value"] = "```lua\n" .. scriptTeleport .. "\n```",
+                    ["inline"] = false
+                }
+            },
+            ["footer"] = {
+                ["text"] = os.date("%Y-%m-%d %H:%M:%S")
+            }
+        }}
     }
 
-    task.spawn(function()
-        local ok, res = pcall(function()
-            return httpReq({
-                Url = CONFIG.HTTP_URL .. "/agent/sync",
-                Method = "POST",
-                Headers = {
-                    ["Content-Type"] = "application/json",
-                    ["X-Agent-Key"] = CONFIG.AGENT_TOKEN,
-                },
-                Body = HttpService:JSONEncode(payload)
-            })
+    local body = HttpService:JSONEncode(data)
+    local headers = {["Content-Type"] = "application/json"}
+    local requestFunc = (syn and syn.request) or http_request or request or HttpPost
+    
+    if requestFunc then
+        pcall(function()
+            requestFunc({Url = WebhookURL, Method = "POST", Headers = headers, Body = body})
         end)
-
-        if ok and res then
-            local statusCode = res.StatusCode or res.status_code or res.Status
-            if statusCode and (statusCode >= 200 and statusCode < 300) then
-                print(string.format("[Nimbus Delta] Berhasil Sync: %d unit, %d item terkirim!", #units, #items))
-            else
-                warn(string.format("[Nimbus Delta] Gagal Sync (HTTP Status %s): %s", tostring(statusCode), tostring(res.Body or res.body or "Unknown error")))
-            end
-        else
-            warn("[Nimbus Delta] Gagal menghubungi backend (" .. CONFIG.HTTP_URL .. "). Pastikan server menyala dan IP/Port benar!")
-        end
-    end)
+    end
 end
 
--- ==========================================
--- 4. START AGENT
--- ==========================================
-print("==================================================")
-print("[Nimbus Agent] Memulai Script di Delta Executor...")
-print("==================================================")
-
-resolveControllers()
-
--- Jalankan Loop Sync berkala
+-- 5. LOOP UTAMA
 task.spawn(function()
     while true do
-        syncStatsDelta()
-        task.wait(CONFIG.SYNC_INTERVAL)
+        -- Eksekusi Auto Buy
+        pcall(function()
+            BuyEvent:FireServer("Trait Reroll")
+        end)
+
+        task.wait(2)
+
+        -- Pindai Data
+        local DataController = getDataController()
+        local traitCount, gems = scanBackpackAndGems(DataController)
+
+        -- Kirim ke Discord Webhook
+        sendWebhook(traitCount, gems)
+
+        task.wait(60) -- Interval pengiriman
     end
 end)
